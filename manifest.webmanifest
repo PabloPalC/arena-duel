@@ -1,0 +1,17 @@
+{
+  "name": "Arena Duel",
+  "short_name": "Arena Duel",
+  "description": "Duelo medieval 1 contra 1 en tiempo real.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#151b33",
+  "theme_color": "#151b33",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

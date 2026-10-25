@@ -8,6 +8,21 @@ import { unlockAudio, sfx, buzz, isMuted, setMuted } from './audio.js';
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
+
+// Render 3D (Three.js) con el 2D como plan B si el móvil no tiene WebGL
+let View3D = null;
+if (!params.has('2d')) {
+  import('./render3d.js')
+    .then((m) => { if (m.webglAvailable()) View3D = m.View3D; })
+    .catch((e) => console.warn('Sin 3D, uso el modo 2D', e));
+}
+function makeView() {
+  if (View3D) {
+    try { return new View3D($('#cv'), $('#ov'), S.me, onViewEvent); }
+    catch (e) { console.warn('Fallo al crear la vista 3D', e); }
+  }
+  return new View($('#cv'), S.me, onViewEvent);
+}
 const LEVEL_NAMES = ['Escudero', 'Caballero', 'Rey Negro'];
 const TICK_MS = DT * 1000;
 
@@ -395,7 +410,7 @@ function startMatch() {
   $('#meName').textContent = S.myName;
   $('#netInfo').textContent = '';
   $('#emotePad').classList.add('hidden');
-  if (!S.view) S.view = new View($('#cv'), S.me, onViewEvent);
+  if (!S.view) S.view = makeView();
   S.view.reset(S.me);
   requestAnimationFrame(() => S.view.resize());
   if (S.mode !== 'guest') {

@@ -38,13 +38,15 @@ También puedes **practicar contra la máquina** en tres niveles: Escudero, Caba
 - HTML, CSS y JavaScript sin frameworks ni build: se publica tal cual en GitHub Pages.
 - El móvil que crea la sala ejecuta la simulación (20 ticks/s) y envía el estado al otro; el invitado manda solo sus jugadas.
 - Conexión directa entre móviles con WebRTC ([PeerJS](https://peerjs.com)). Si la red no lo permite, cambia sola a un relé MQTT público.
-- Sonidos sintetizados con Web Audio; gráficos dibujados en Canvas.
+- Gráficos 3D con [Three.js](https://threejs.org): cámara inclinada, torres con arquera y rey, y tropas low-poly animadas (caminan, atacan, vuelan). Si el móvil no tiene WebGL, cambia solo a una vista 2D.
+- Sonidos sintetizados con Web Audio.
 
 ```
 js/data.js    cartas, torres y constantes
 js/sim.js     simulación (movimiento, combate, puentes, tiempo)
 js/bot.js     IA del modo práctica
-js/render.js  dibujo de la arena y efectos
+js/render3d.js  arena, modelos 3D y efectos (Three.js)
+js/render.js    vista 2D de respaldo (añade ?2d a la URL para forzarla)
 js/net.js     salas, WebRTC y relé
 js/main.js    menús, partida y controles
 ```

@@ -254,6 +254,7 @@ input { font: inherit; -webkit-user-select: text; user-select: text; }
 
 #arenaWrap { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; touch-action: none; }
 #cv { position: absolute; left: 0; top: 0; display: block; touch-action: none; }
+#ov { position: absolute; left: 0; top: 0; display: block; pointer-events: none; }
 
 #banner {
   position: absolute; left: 50%; top: 42%;

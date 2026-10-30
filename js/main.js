@@ -1,69 +1,80 @@
-// Arena Duel — interfaz, bucle de juego y red
-import { CARDS, DT, W, H, ELIXIR_RATE, EMOTES, PROTOCOL, TOWER_LAYOUT, TOWERS, TROOP_SPEED_LABEL } from './data.js';
+// Arena Duel — interfaz, perfil, mazos, bucle de juego y red
+import {
+  CARDS, UNITS, RARITY, DT, W, H, ELIXIR_RATE, EMOTES, PROTOCOL, TOWER_LAYOUT, TOWERS, TROOP_SPEED_LABEL,
+  DEFAULT_DECK, DECK_SIZE, validDeck, rankOf,
+} from './data.js';
 import { Game, snapPos, placementOk, mirror } from './sim.js';
-import { Bot } from './bot.js';
+import { Bot, BOT_DECKS } from './bot.js';
 import { View } from './render.js';
 import { hostRoom, joinRoom, cleanCode } from './net.js';
-import { unlockAudio, sfx, buzz, isMuted, setMuted } from './audio.js';
+import { unlockAudio, sfx, buzz as rawBuzz, setMuted } from './audio.js';
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
-
-// Render 3D (Three.js) con el 2D como plan B si el móvil no tiene WebGL
-let View3D = null;
-if (!params.has('2d')) {
-  import('./render3d.js')
-    .then((m) => { if (m.webglAvailable()) View3D = m.View3D; })
-    .catch((e) => console.warn('Sin 3D, uso el modo 2D', e));
-}
-function makeView() {
-  if (View3D) {
-    try { return new View3D($('#cv'), $('#ov'), S.me, onViewEvent); }
-    catch (e) { console.warn('Fallo al crear la vista 3D', e); }
-  }
-  return new View($('#cv'), S.me, onViewEvent);
-}
 const LEVEL_NAMES = ['Escudero', 'Caballero', 'Rey Negro'];
 const TICK_MS = DT * 1000;
+const TROPHY_WIN = 30, TROPHY_LOSS = 20;
 
+// ---------- Perfil guardado en el móvil ----------
+const PROFILE_KEY = 'ad_profile_v2';
+function loadProfile() {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(PROFILE_KEY) || 'null'); } catch { /* */ }
+  if (!p || typeof p !== 'object') p = {};
+  let oldName = '';
+  try { oldName = localStorage.getItem('ad_name') || ''; } catch { /* */ }
+  const def = {
+    name: oldName, trophies: 0, best: 0, history: {}, decks: [DEFAULT_DECK.slice(), DEFAULT_DECK.slice(), DEFAULT_DECK.slice()],
+    slot: 0, quality: 'auto', sound: true, vibe: true, wins: 0, losses: 0,
+  };
+  p = { ...def, ...p };
+  p.decks = [0, 1, 2].map(i => (validDeck(p.decks && p.decks[i]) ? p.decks[i] : DEFAULT_DECK.slice()));
+  if (![0, 1, 2].includes(p.slot)) p.slot = 0;
+  if (!['alta', 'auto', 'ahorro'].includes(p.quality)) p.quality = 'auto';
+  return p;
+}
+const PF = loadProfile();
+function saveProfile() { try { localStorage.setItem(PROFILE_KEY, JSON.stringify(PF)); } catch { /* */ } }
+const myDeck = () => PF.decks[PF.slot];
+setMuted(!PF.sound);
+const buzz = (ms) => { if (PF.vibe) rawBuzz(ms); };
+
+// ---------- Estado ----------
 const S = {
   state: 'menu',        // menu | lobby | countdown | playing | over
   mode: null,           // practice | host | guest
-  me: 0,
-  level: 1,
-  game: null, bot: null, view: null,
+  me: 0, level: 1,
+  game: null, bot: null, view: null, view3d: false,
   tr: null, room: null,
-  acc: 0, lastT: 0,
+  acc: 0, lastT: 0, lastSimAt: 0, lastRenderAt: 0,
   outEv: [], sinceSend: 0,
-  hud: { hand: [0, 1, 2, 3], next: 4, el: 5, elAt: 0, tm: 1800, ph: 0, crowns: [0, 0] },
+  hud: { hand: [-1, -1, -1, -1], next: -1, el: 5, elAt: 0, tm: 1800, ph: 0, crowns: [0, 0] },
   pending: [], seq: 0,
   sel: -1, press: null, canvasPress: null, ghost: null,
-  tickOff: null, lastMsgAt: 0, rtt: 0,
+  tickOff: null, jitter: 0, lastMsgAt: 0, rtt: 0,
   endHandled: false,
   rematch: { me: false, foe: false },
-  foeName: 'Rival', myName: 'Tú',
-  emoteAt: 0,
-  handKey: '',
-  cardEls: [],
-  wakeLock: null,
+  foeName: 'Rival', myName: 'Tú', foeTrophies: null, foeDeck: null,
+  emoteAt: 0, handKey: '', cardEls: [], wakeLock: null,
+  lastCount: -1, swapCard: -1,
 };
+window.__ad = S;
 
-// ---------- utilidades de interfaz ----------
-const SCREENS = ['menu', 'practice', 'lobby', 'join', 'deck', 'help', 'versus', 'game'];
+// ---------- Utilidades de interfaz ----------
+const SCREENS = ['menu', 'practice', 'lobby', 'join', 'deck', 'help', 'settings', 'versus', 'game'];
 function show(id) {
   for (const s of SCREENS) $('#' + s).classList.toggle('hidden', s !== id);
   if (id !== 'game') $('#overlay').classList.add('hidden');
+  $('#confirm').classList.add('hidden');
 }
-
 let toastT = 0;
 function toast(msg) {
   const t = $('#toast');
   t.textContent = msg;
   t.classList.remove('hidden');
   clearTimeout(toastT);
-  toastT = setTimeout(() => t.classList.add('hidden'), 1300);
+  toastT = setTimeout(() => t.classList.add('hidden'), 1400);
 }
-
 function banner(text, cls = '') {
   const b = $('#banner');
   b.textContent = text;
@@ -73,7 +84,6 @@ function banner(text, cls = '') {
   clearTimeout(banner.t);
   banner.t = setTimeout(() => b.classList.add('hidden'), 1900);
 }
-
 function goFullscreen() {
   const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent);
   const el = document.documentElement;
@@ -81,7 +91,6 @@ function goFullscreen() {
     el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
   }
 }
-
 async function keepAwake() {
   try {
     if ('wakeLock' in navigator && !S.wakeLock) {
@@ -93,44 +102,47 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && (S.state === 'playing' || S.state === 'countdown')) keepAwake();
 });
-
-function getName() {
-  const v = ($('#nameInput').value || '').trim();
-  return v || 'Jugador';
-}
-function saveName(v) {
-  try { localStorage.setItem('ad_name', v); } catch { /* */ }
-}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const art = (c) => `art/${CARDS[c].id}.webp`;
+function getName() { return (($('#nameInput').value || '').trim() || 'Jugador').slice(0, 14); }
 
 // ---------- Menú ----------
+function renderProfile() {
+  $('#pfName').textContent = PF.name || 'Jugador';
+  $('#pfTrophies').textContent = PF.trophies;
+  $('#pfRank').textContent = rankOf(PF.trophies).name;
+  const d = myDeck();
+  $('#deckMini').innerHTML = d.map(c => `<div class="dm r-${CARDS[c].rarity}" style="background-image:url(${art(c)})"><em>${CARDS[c].cost}</em></div>`).join('');
+  $('#deckAvg').textContent = avgCost(d);
+  const hist = Object.values(PF.history).sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, 4);
+  $('#historyBox').innerHTML = hist.length
+    ? `<h3>Tus duelos</h3>` + hist.map(h => `<div class="hrow"><span>contra <b>${esc(h.name)}</b></span><span class="rec"><i class="w">${h.w}V</i> · <i class="l">${h.l}D</i>${h.d ? ` · ${h.d}E` : ''}</span></div>`).join('')
+    : '';
+}
+const avgCost = (d) => (d.reduce((s, c) => s + CARDS[c].cost, 0) / d.length).toFixed(1);
+
 function initMenu() {
-  let saved = '';
-  try { saved = localStorage.getItem('ad_name') || ''; } catch { /* */ }
-  $('#nameInput').value = saved;
-  $('#nameInput2').value = saved;
-  const sync = (src, dst) => src.addEventListener('input', () => { dst.value = src.value; saveName(src.value.trim()); });
-  sync($('#nameInput'), $('#nameInput2'));
-  sync($('#nameInput2'), $('#nameInput'));
+  $('#nameInput').value = PF.name;
+  $('#nameInput2').value = PF.name;
+  const onName = (src, dst) => src.addEventListener('input', () => { dst.value = src.value; PF.name = src.value.trim().slice(0, 14); saveProfile(); $('#pfName').textContent = PF.name || 'Jugador'; });
+  onName($('#nameInput'), $('#nameInput2'));
+  onName($('#nameInput2'), $('#nameInput'));
 
   $('#btnHost').onclick = () => { unlockAudio(); sfx('select'); startHost(); };
   $('#btnJoin').onclick = () => { unlockAudio(); sfx('select'); openJoin(''); };
   $('#btnPractice').onclick = () => { unlockAudio(); sfx('select'); show('practice'); };
-  $('#btnDeck').onclick = () => { unlockAudio(); show('deck'); };
+  $('#btnDeck').onclick = () => { unlockAudio(); sfx('select'); openDeck(); };
   $('#btnHelp').onclick = () => { unlockAudio(); show('help'); };
-  const sb = $('#btnSound');
-  const paint = () => { sb.textContent = isMuted() ? '🔇' : '🔊'; };
-  paint();
-  sb.onclick = () => { unlockAudio(); setMuted(!isMuted()); paint(); sfx('select'); };
+  $('#btnSettings').onclick = () => { unlockAudio(); renderSettings(); show('settings'); };
 
   document.querySelectorAll('#practice [data-level]').forEach(b => {
     b.onclick = () => { unlockAudio(); goFullscreen(); startPractice(+b.dataset.level); };
   });
   document.querySelectorAll('.back').forEach(b => {
     if (b.id === 'lobbyCancel') return;
-    b.onclick = () => { sfx('select'); show('menu'); };
+    b.onclick = () => { sfx('select'); renderProfile(); show('menu'); };
   });
-  $('#lobbyCancel').onclick = () => { leaveRoom(); show('menu'); };
-
+  $('#lobbyCancel').onclick = () => { leaveRoom(); S.mode = null; S.state = 'menu'; show('menu'); };
   $('#btnShare').onclick = shareLink;
   $('#btnCopy').onclick = copyLink;
 
@@ -139,41 +151,128 @@ function initMenu() {
   ci.addEventListener('keydown', (e) => { if (e.key === 'Enter') doJoin(); });
   $('#btnJoinGo').onclick = () => { unlockAudio(); goFullscreen(); doJoin(); };
 
-  buildDeckList();
-
+  initDeckEditor();
+  initSettings();
+  renderProfile();
   const sala = cleanCode(params.get('sala'));
   if (sala.length === 4) openJoin(sala);
 }
 
-function buildDeckList() {
-  const box = $('#deckList');
-  box.innerHTML = '';
-  for (const c of CARDS) {
-    const d = document.createElement('div');
-    d.className = 'deck-item';
-    d.style.setProperty('--c', c.color);
-    let rows = [];
-    if (c.type === 'spell') {
-      rows = [['Daño', c.spell.dmg], ['A torres', Math.round(c.spell.dmg * c.spell.towerMult)], ['Radio', c.spell.radius + ' casillas']];
-    } else {
-      const u = c.unit;
-      const tg = u.targets === 'both' ? 'Tierra y aire' : u.targets === 'ground' ? 'Solo tierra' : 'Solo edificios';
-      rows = [['Vida', u.hp + (c.count > 1 ? ` ×${c.count}` : '')], ['Daño', u.dmg + (u.splash ? ' (área)' : '')],
-        ['Alcance', u.range >= 2 ? u.range + ' casillas' : 'Cuerpo a cuerpo'], ['Ataca', tg]];
-      rows.push(c.type === 'building' ? ['Dura', u.lifetime + ' s'] : ['Velocidad', TROOP_SPEED_LABEL(u.speed) + (u.air ? ', vuela' : '')]);
-    }
-    d.innerHTML = `<div class="art"><em><span>${c.cost}</span></em>${c.icon}</div>
-      <div><h3>${c.name}</h3><p>${c.desc}</p><dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></div>`;
-    box.appendChild(d);
+// ---------- Ajustes ----------
+function renderSettings() {
+  document.querySelectorAll('#qualitySeg button').forEach(b => b.classList.toggle('on', b.dataset.q === PF.quality));
+  document.querySelectorAll('#soundSeg button').forEach(b => b.classList.toggle('on', (b.dataset.s === '1') === PF.sound));
+  document.querySelectorAll('#vibeSeg button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === PF.vibe));
+}
+function initSettings() {
+  $('#qualitySeg').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    PF.quality = b.dataset.q; saveProfile(); renderSettings(); sfx('select');
+    if (S.view) S.view.setQuality(PF.quality);
+  };
+  $('#soundSeg').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    PF.sound = b.dataset.s === '1'; setMuted(!PF.sound); saveProfile(); renderSettings(); sfx('select');
+  };
+  $('#vibeSeg').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    PF.vibe = b.dataset.v === '1'; saveProfile(); renderSettings(); buzz(30);
+  };
+}
+
+// ---------- Editor de mazo ----------
+const SORTED = CARDS.map((c, i) => i).sort((a, b) => CARDS[a].cost - CARDS[b].cost || Object.keys(RARITY).indexOf(CARDS[a].rarity) - Object.keys(RARITY).indexOf(CARDS[b].rarity));
+function tileHTML(c, extra = '') {
+  const card = CARDS[c];
+  return `<div class="ctile r-${card.rarity} ${extra}" data-c="${c}" style="background-image:url(${art(c)})"><em>${card.cost}</em><span>${card.name}</span></div>`;
+}
+function openDeck() { S.swapCard = -1; renderDeck(); show('deck'); }
+function renderDeck() {
+  const d = myDeck();
+  document.querySelectorAll('#deckTabs button').forEach(b => b.classList.toggle('on', +b.dataset.slot === PF.slot));
+  $('#deckSlots').innerHTML = d.map((c, i) => tileHTML(c, S.swapCard >= 0 ? 'wiggle' : '').replace('<div ', `<div data-slot="${i}" `)).join('');
+  $('#deckAvg2').textContent = avgCost(d);
+  $('#collection').innerHTML = SORTED.map(c => tileHTML(c, d.includes(c) ? 'indeck' : '')).join('');
+  $('#deckHint').textContent = S.swapCard >= 0 ? `Elige qué carta cambiar por ${CARDS[S.swapCard].name}` : 'Toca una carta para verla';
+  $('#deckHint').classList.toggle('hot', S.swapCard >= 0);
+}
+function statRows(card) {
+  if (card.type === 'spell') {
+    const sp = card.spell;
+    const rows = [];
+    if (sp.dmg) rows.push(['Daño', sp.dmg], ['A torres', Math.round(sp.dmg * sp.towerMult)]);
+    rows.push(['Radio', sp.radius + ' casillas']);
+    if (sp.hits) rows.push(['Rayos', sp.hits]);
+    if (sp.freeze) rows.push(['Congela', sp.freeze + ' s']);
+    if (sp.boost) rows.push(['Furia', '+' + Math.round((sp.boost - 1) * 100) + ' % · ' + sp.duration + ' s']);
+    return rows;
   }
+  const u = UNITS[card.unit];
+  const tg = u.targets === 'both' ? 'Tierra y aire' : u.targets === 'ground' ? 'Solo tierra' : u.targets === 'buildings' ? 'Solo edificios' : '—';
+  const rows = [['Vida', u.hp + (card.count > 1 ? ` ×${card.count}` : '')]];
+  if (u.dmg) rows.push(['Daño', u.dmg + (u.splash ? ' (área)' : u.spin ? ' (giro)' : u.ramp ? ' (sube hasta ×12)' : u.charge ? ' (×2 en carga)' : '')]);
+  if (u.dmg) rows.push(['Ataque cada', u.hitSpeed + ' s']);
+  if (u.dmg) rows.push(['Alcance', u.range >= 2 ? u.range + ' casillas' : 'Cuerpo a cuerpo']);
+  if (u.dmg) rows.push(['Ataca a', tg]);
+  rows.push(u.building ? ['Dura', u.lifetime + ' s'] : ['Velocidad', TROOP_SPEED_LABEL(u.speed) + (u.air ? ', vuela' : '') + (u.jump ? ', salta el río' : '')]);
+  if (u.spawn) rows.push(['Invoca', `${u.spawn.count} esqueleto${u.spawn.count > 1 ? 's' : ''} cada ${u.spawn.every} s`]);
+  if (u.slow) rows.push(['Ralentiza', u.slow + ' s']);
+  return rows;
+}
+function openSheet(c, fromSlot) {
+  const card = CARDS[c];
+  const R = RARITY[card.rarity];
+  $('#sheetArt').style.backgroundImage = `url(${art(c)})`;
+  $('#sheetArt').innerHTML = `<em>${card.cost}</em>`;
+  $('#sheetArt').className = 'sheet-art r-' + card.rarity;
+  $('#sheetRarity').textContent = R.name + ' · ' + (card.type === 'spell' ? 'Hechizo' : card.type === 'building' ? 'Edificio' : 'Tropa');
+  $('#sheetRarity').style.color = R.color;
+  $('#sheetName').textContent = card.name;
+  $('#sheetDesc').textContent = card.desc;
+  $('#sheetStats').innerHTML = statRows(card).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  const inDeck = myDeck().includes(c);
+  const btn = $('#sheetUse');
+  btn.classList.toggle('hidden', inDeck);
+  btn.onclick = () => {
+    S.swapCard = c;
+    $('#cardSheet').classList.add('hidden');
+    sfx('select');
+    renderDeck();
+    $('#deckSlots').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  $('#cardSheet').classList.remove('hidden');
+}
+function initDeckEditor() {
+  $('#deckTabs').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    PF.slot = +b.dataset.slot; saveProfile(); S.swapCard = -1; sfx('select'); renderDeck();
+  };
+  $('#deckSlots').onclick = (e) => {
+    const t = e.target.closest('.ctile'); if (!t) return;
+    const slot = +t.dataset.slot;
+    if (S.swapCard >= 0) {
+      const d = myDeck();
+      d[slot] = S.swapCard;
+      S.swapCard = -1;
+      saveProfile();
+      sfx('deploy'); buzz(15);
+      renderDeck();
+      return;
+    }
+    openSheet(+t.dataset.c, slot);
+  };
+  $('#collection').onclick = (e) => {
+    const t = e.target.closest('.ctile'); if (!t) return;
+    sfx('select');
+    openSheet(+t.dataset.c);
+  };
+  $('#cardSheet').onclick = (e) => { if (e.target.id === 'cardSheet' || e.target.closest('.sheet-close')) $('#cardSheet').classList.add('hidden'); };
 }
 
 // ---------- Red ----------
-function roomLink(code) {
-  return `${location.origin}${location.pathname}?sala=${code}`;
-}
+function roomLink(code) { return `${location.origin}${location.pathname}?sala=${code}`; }
 async function shareLink() {
-  const code = S.room && S.room.code;
+  const code = S.roomCode;
   if (!code) return;
   const url = roomLink(code);
   if (navigator.share) {
@@ -182,14 +281,10 @@ async function shareLink() {
   copyLink();
 }
 async function copyLink() {
-  const code = S.room && S.room.code;
+  const code = S.roomCode;
   if (!code) return;
   try { await navigator.clipboard.writeText(roomLink(code)); $('#lobbyStatus').textContent = 'Enlace copiado. Esperando a tu rival…'; }
   catch { $('#lobbyStatus').textContent = 'Comparte el código ' + code; }
-}
-
-function viaLabel(via) {
-  return !via.includes('relay') || via.length > 1 ? 'Esperando a tu rival…' : 'Esperando a tu rival (modo relé)…';
 }
 
 async function startHost() {
@@ -199,17 +294,20 @@ async function startHost() {
   S.me = 0;
   S.myName = getName();
   S.state = 'lobby';
+  S.roomCode = null;
   show('lobby');
   $('#roomCode').textContent = '····';
   $('#lobbyStatus').textContent = 'Preparando la sala…';
   try {
-    const room = await hostRoom((tr) => onTransport(tr));
+    const room = await hostRoom(
+      (tr, hello) => { onTransport(tr); onNet(hello); },
+      (via) => { if (!S.tr && S.mode === 'host') $('#lobbyStatus').textContent = via.length === 1 && via[0] === 'relay' ? 'Esperando a tu rival (modo relé)…' : 'Esperando a tu rival…'; },
+      (code) => { S.roomCode = code; $('#roomCode').textContent = code; },
+    );
     if (S.state !== 'lobby' || S.mode !== 'host') { room.close(); return; }
     S.room = room;
-    $('#roomCode').textContent = room.code;
-    if (!S.tr) $('#lobbyStatus').textContent = viaLabel(room.via);
   } catch (e) {
-    $('#lobbyStatus').textContent = e.message || 'No se pudo crear la sala.';
+    if (S.mode === 'host') $('#lobbyStatus').textContent = e.message || 'No se pudo crear la sala.';
   }
 }
 
@@ -239,7 +337,7 @@ async function doJoin() {
     if (S.mode !== 'guest' || S.state !== 'lobby') { tr.close(); return; }
     onTransport(tr);
     $('#joinStatus').textContent = 'Conectado. Saludando…';
-    send({ t: 'hello', name: S.myName, v: PROTOCOL });
+    send({ t: 'hello', name: S.myName, v: PROTOCOL, deck: myDeck(), tr: PF.trophies });
   } catch (e) {
     $('#joinWait').classList.add('hidden');
     $('#btnJoinGo').disabled = false;
@@ -264,11 +362,11 @@ function leaveRoom() {
   if (S.room) { const r = S.room; S.room = null; setTimeout(() => r.close(), 200); }
 }
 
-function onPeerGone(msg) {
+function onPeerGone(msg, left = false) {
   if (S.mode === 'practice' || S.mode === null || S.state === 'menu') return;
   const tr = S.tr;
   S.tr = null;
-  if (tr) { tr.onclose = null; tr.onmessage = null; try { tr.close(); } catch { /* */ } }
+  if (tr) { tr.onclose = null; tr.onmessage = null; try { tr.close(true); } catch { /* */ } }
   if (S.state === 'lobby' && S.mode === 'guest') {
     $('#joinError').textContent = msg;
     $('#joinWait').classList.add('hidden');
@@ -279,32 +377,43 @@ function onPeerGone(msg) {
     $('#lobbyStatus').textContent = 'Tu rival se ha ido. Cancela y crea otra sala.';
     return;
   }
+  const wasPlaying = S.state === 'playing';
   if (S.state === 'countdown') S.state = 'over';
   if (S.state === 'playing' || S.state === 'over') {
     S.state = 'over';
+    let delta = null;
+    if (wasPlaying && !S.endHandled && left) delta = recordResult('win');
     S.endHandled = true;
+    $('#countdown').classList.add('hidden');
     show('game');
-    showOverlay({ title: 'Sin rival', lose: true, text: msg, rematch: false });
+    showOverlay({ title: left && wasPlaying ? '¡Victoria!' : 'Sin rival', lose: !(left && wasPlaying), text: msg, rematch: false, delta });
   }
 }
 
 function onNet(m) {
+  if (!m || typeof m !== 'object') return;
   S.lastMsgAt = performance.now();
   switch (m.t) {
     case 'hello':
       if (S.mode !== 'host') return;
-      if (m.v !== PROTOCOL) { send({ t: 'err', msg: 'Tu versión del juego es distinta. Recarga la página.' }); return; }
-      S.foeName = (m.name || 'Rival').slice(0, 14);
-      send({ t: 'welcome', name: S.myName, v: PROTOCOL });
+      if (m.v !== PROTOCOL) { send({ t: 'err', msg: 'Tenéis versiones distintas del juego. Recargad la página los dos.' }); return; }
+      S.foeName = String(m.name || 'Rival').slice(0, 14);
+      S.foeDeck = validDeck(m.deck) ? m.deck : DEFAULT_DECK.slice();
+      S.foeTrophies = Number.isFinite(m.tr) ? m.tr : null;
+      send({ t: 'welcome', name: S.myName, v: PROTOCOL, deck: myDeck(), tr: PF.trophies });
       if (S.state === 'lobby') beginCountdown();
       break;
     case 'welcome':
       if (S.mode !== 'guest') return;
-      S.foeName = (m.name || 'Rival').slice(0, 14);
+      S.foeName = String(m.name || 'Rival').slice(0, 14);
+      S.foeDeck = validDeck(m.deck) ? m.deck : DEFAULT_DECK.slice();
+      S.foeTrophies = Number.isFinite(m.tr) ? m.tr : null;
       $('#joinStatus').textContent = '¡Dentro! Empezamos…';
       break;
     case 'err':
       $('#joinError').textContent = m.msg;
+      $('#joinWait').classList.add('hidden');
+      $('#btnJoinGo').disabled = false;
       break;
     case 'full':
       $('#joinError').textContent = 'Esa sala ya tiene dos jugadores.';
@@ -338,15 +447,9 @@ function onNet(m) {
       updateRematchInfo();
       if (S.mode === 'host' && S.rematch.me) beginCountdown();
       break;
-    case 'ping':
-      send({ t: 'pong', ts: m.ts });
-      break;
-    case 'pong':
-      S.rtt = Math.round(performance.now() - m.ts);
-      break;
-    case 'leave':
-      onPeerGone('Tu rival ha salido de la partida.');
-      break;
+    case 'ping': send({ t: 'pong', ts: m.ts }); break;
+    case 'pong': S.rtt = Math.round(performance.now() - m.ts); break;
+    case 'leave': onPeerGone('Tu rival ha salido de la partida.', true); break;
   }
 }
 
@@ -356,8 +459,7 @@ setInterval(() => {
   if ((S.state === 'playing' || S.state === 'over' || S.state === 'countdown') && performance.now() - S.lastMsgAt > 10000) {
     onPeerGone('Tu rival no responde. Puede que haya cerrado el juego o se haya quedado sin cobertura.');
   }
-  const ni = $('#netInfo');
-  if (S.state === 'playing') ni.textContent = `${S.rtt} ms · ${S.tr && S.tr.kind === 'relay' ? 'relé' : 'directo'}`;
+  if (S.state === 'playing') $('#netInfo').textContent = `${S.rtt} ms · ${S.tr && S.tr.kind === 'relay' ? 'relé' : 'directo'}`;
 }, 2000);
 
 // ---------- Arranque de partida ----------
@@ -367,12 +469,32 @@ function beginCountdown() {
   countdown(startMatch);
 }
 
+function ensureView() {
+  if (S.view) return;
+  const wrap = $('#arenaWrap');
+  if (View3D && !params.has('2d')) {
+    try { S.view = new View3D($('#cv'), wrap, S.me, onViewEvent, { quality: PF.quality }); S.view3d = true; }
+    catch (e) { console.warn('Sin 3D:', e); }
+  }
+  if (!S.view) S.view = new View($('#cv'), S.me, onViewEvent);
+}
+
 function countdown(then) {
   S.state = 'countdown';
   keepAwake();
   show('versus');
   $('#vsFoe').textContent = S.foeName;
   $('#vsMe').textContent = S.myName;
+  $('#vsMeTr').textContent = S.mode === 'practice' ? '' : `🏆 ${PF.trophies}`;
+  $('#vsFoeTr').textContent = S.foeTrophies != null && S.mode !== 'practice' ? `🏆 ${S.foeTrophies}` : '';
+  // preparar el motor gráfico mientras dura la cuenta atrás
+  setTimeout(() => {
+    try {
+      ensureView();
+      const decks = [myDeck(), S.foeDeck || DEFAULT_DECK];
+      if (S.view.warm) S.view.warm([...new Set([...decks[0], ...decks[1]])]);
+    } catch (e) { console.warn(e); }
+  }, 60);
   const el = $('#vsCount');
   let n = 3;
   const tick = () => {
@@ -393,15 +515,18 @@ function startPractice(level) {
   S.level = level;
   S.myName = getName();
   S.foeName = LEVEL_NAMES[level];
+  S.foeTrophies = null;
+  const pool = level === 0 ? [0] : level === 1 ? [1, 4] : [2, 3];
+  S.foeDeck = BOT_DECKS[pool[Math.floor(Math.random() * pool.length)]];
   countdown(startMatch);
 }
 
 function startMatch() {
   S.state = 'playing';
   S.endHandled = false;
-  S.pending = []; S.seq = 0; S.tickOff = null;
+  S.pending = []; S.seq = 0; S.tickOff = null; S.jitter = 0;
   S.sel = -1; S.ghost = null; S.press = null; S.canvasPress = null;
-  S.outEv = []; S.sinceSend = 0;
+  S.outEv = []; S.sinceSend = 0; S.lastCount = -1;
   S.rematch = { me: false, foe: false };
   S.hud = { hand: [-1, -1, -1, -1], next: -1, el: 5, elAt: performance.now(), tm: 1800, ph: 0, crowns: [0, 0] };
   S.handKey = '';
@@ -410,11 +535,13 @@ function startMatch() {
   $('#meName').textContent = S.myName;
   $('#netInfo').textContent = '';
   $('#emotePad').classList.add('hidden');
-  if (!S.view) S.view = makeView();
+  $('#countdown').classList.add('hidden');
+  ensureView();
+  S.view.resize();
   S.view.reset(S.me);
-  requestAnimationFrame(() => S.view.resize());
   if (S.mode !== 'guest') {
-    S.game = new Game();
+    const decks = S.mode === 'practice' ? [myDeck(), S.foeDeck] : [myDeck(), S.foeDeck];
+    S.game = new Game({ decks });
     S.bot = S.mode === 'practice' ? new Bot(S.game, 1, S.level) : null;
     S.acc = 0; S.lastT = performance.now();
     const snap = S.game.snapshot(0); snap.ev = [];
@@ -428,16 +555,17 @@ function startMatch() {
   setTimeout(() => { if (S.state === 'playing') toast('Arrastra una carta a tu mitad del campo'); }, 400);
 }
 
-// ---------- Bucle del anfitrión / práctica ----------
-setInterval(simLoop, 15);
-function simLoop() {
+// ---------- Simulación (anfitrión y práctica) ----------
+function simStep() {
   const g = S.game;
   if (!g || S.mode === 'guest' || (S.state !== 'playing' && S.state !== 'over')) return;
   const now = performance.now();
+  S.lastSimAt = now;
   S.acc += (now - S.lastT) / 1000;
   S.lastT = now;
   if (S.acc > 0.5) S.acc = 0.5;
-  const sendEvery = S.tr && S.tr.kind === 'relay' ? 2 : 1;
+  const relay = S.tr && S.tr.kind === 'relay';
+  const sendEvery = relay ? 2 : 1;
   while (S.acc >= DT) {
     S.acc -= DT;
     if (g.phase !== 'over') {
@@ -457,12 +585,16 @@ function simLoop() {
         gs.ev = S.outEv;
         S.outEv = [];
         S.sinceSend = 0;
+        // los mensajes no pueden pasar de ~16 KB: si hace falta se quitan efectos cosméticos
+        if (JSON.stringify(gs).length > 14000) gs.ev = gs.ev.filter(e => e.t !== 'proj' && e.t !== 'hit' && e.t !== 'spawn');
         send(gs);
       }
     }
   }
   readLocalHud();
 }
+// respaldo por si el navegador pausa requestAnimationFrame (pantalla tapada, etc.)
+setInterval(() => { if (performance.now() - S.lastSimAt > 120) simStep(); }, 50);
 
 function readLocalHud() {
   const g = S.game;
@@ -474,13 +606,17 @@ function readLocalHud() {
   S.hud.crowns = g.crowns.slice();
 }
 
-// ---------- Invitado: instantáneas ----------
+// ---------- Invitado: instantáneas con búfer adaptativo ----------
 function onSnapshot(m) {
   const now = performance.now();
   S.view.pushFrame(m);
   const off = m.k - now / TICK_MS;
-  if (S.tickOff === null || Math.abs(off - S.tickOff) > 40) S.tickOff = off;
-  else S.tickOff += (off - S.tickOff) * (off > S.tickOff ? 0.25 : 0.04);
+  if (S.tickOff === null || Math.abs(off - S.tickOff) > 40) { S.tickOff = off; S.jitter = 1; }
+  else {
+    const dev = off - S.tickOff;
+    S.jitter += (Math.abs(dev) - S.jitter) * 0.08;
+    S.tickOff += dev * (dev > 0 ? 0.25 : 0.04);
+  }
   S.pending = S.pending.filter(p => p.seq > m.ack && now - p.at < 2500);
   const owed = S.pending.reduce((s, p) => s + p.cost, 0);
   S.hud.el = m.el / 100 - owed;
@@ -492,12 +628,13 @@ function onSnapshot(m) {
     const key = m.h.join(',') + '|' + m.n;
     if (key !== S.handKey) { S.hud.hand = m.h.slice(); S.hud.next = m.n; renderHand(); }
   }
-  if (m.w >= 0 && !S.endHandled) setTimeout(() => { if (!S.endHandled) handleEnd(m.w); }, 2500);
+  if (m.w >= 0 && !S.endHandled) setTimeout(() => { if (!S.endHandled) handleEnd(m.w, ''); }, 2500);
 }
 
 function guestRenderTick() {
   if (S.tickOff === null) return 0;
-  const delay = S.tr && S.tr.kind === 'relay' ? 5 : 3;
+  const relay = S.tr && S.tr.kind === 'relay';
+  const delay = Math.min(9, Math.max(relay ? 3 : 2, 1.5 + S.jitter * 2.2 + (relay ? 1 : 0)));
   const latest = S.view.latest();
   const rt = performance.now() / TICK_MS + S.tickOff - delay;
   return latest ? Math.min(rt, latest.k) : rt;
@@ -510,12 +647,6 @@ function currentElixir() {
 }
 
 // ---------- HUD ----------
-function cardInner(ci) {
-  if (ci < 0 || ci === undefined) return '';
-  const c = CARDS[ci];
-  return `<div class="cost"><b>${c.cost}</b></div><div class="art">${c.icon}</div><div class="nm${c.name.length > 10 ? ' long' : ''}">${c.name}</div><div class="cover"></div>`;
-}
-
 function buildHandEls() {
   const hand = $('#hand');
   hand.innerHTML = '';
@@ -524,8 +655,9 @@ function buildHandEls() {
     const d = document.createElement('div');
     d.className = 'card';
     d.dataset.slot = i;
+    d.innerHTML = '<div class="cost"><b></b></div><div class="cover"></div>';
     hand.appendChild(d);
-    S.cardEls.push({ el: d, card: -2, cover: -1, na: null });
+    S.cardEls.push({ el: d, card: -2, cover: -1, na: null, costEl: d.querySelector('.cost b'), coverEl: d.querySelector('.cover') });
   }
 }
 
@@ -538,9 +670,15 @@ function renderHand() {
     if (ce.card !== ci) {
       const wasCard = ce.card >= 0;
       ce.card = ci;
-      ce.el.innerHTML = cardInner(ci);
-      ce.el.style.setProperty('--c', ci >= 0 ? CARDS[ci].color : '#444');
-      ce.el.classList.toggle('used', ci < 0);
+      if (ci >= 0) {
+        const c = CARDS[ci];
+        ce.el.style.backgroundImage = `url(${art(ci)})`;
+        ce.el.className = 'card r-' + c.rarity;
+        ce.costEl.textContent = c.cost;
+      } else {
+        ce.el.style.backgroundImage = '';
+        ce.el.className = 'card used';
+      }
       ce.cover = -1; ce.na = null;
       if (wasCard && ci >= 0) { ce.el.classList.remove('flash'); void ce.el.offsetWidth; ce.el.classList.add('flash'); }
     }
@@ -548,17 +686,14 @@ function renderHand() {
   });
   const nx = $('#nextCard');
   const n = S.hud.next;
-  nx.textContent = n >= 0 && n !== undefined ? CARDS[n].icon : '❔';
-  nx.style.setProperty('--c', n >= 0 && n !== undefined ? CARDS[n].color : '#444');
+  nx.style.backgroundImage = n >= 0 && n !== undefined ? `url(${art(n)})` : '';
 }
 
-let lastHud = {};
+const lastHud = {};
 function updateHud(force) {
   const el = currentElixir();
-  const pct = Math.max(0, Math.min(100, el * 10));
-  const fill = $('#elixirFill');
-  const pr = Math.round(pct * 2) / 2;
-  if (force || lastHud.pct !== pr) { fill.style.width = pr + '%'; lastHud.pct = pr; }
+  const pr = Math.round(Math.max(0, Math.min(100, el * 10)) * 2) / 2;
+  if (force || lastHud.pct !== pr) { $('#elixirFill').style.width = pr + '%'; lastHud.pct = pr; }
   const ef = Math.floor(el + 1e-6);
   if (force || lastHud.ef !== ef) { $('#elixirNum').textContent = ef; lastHud.ef = ef; }
   for (const ce of S.cardEls) {
@@ -567,7 +702,7 @@ function updateHud(force) {
     const na = el < cost;
     if (ce.na !== na) { ce.el.classList.toggle('na', na); ce.na = na; }
     const cv = na ? Math.round((1 - el / cost) * 50) * 2 : 0;
-    if (ce.cover !== cv) { const c = ce.el.querySelector('.cover'); if (c) c.style.height = cv + '%'; ce.cover = cv; }
+    if (ce.cover !== cv) { ce.coverEl.style.height = cv + '%'; ce.cover = cv; }
   }
   const tm = Math.max(0, S.hud.tm);
   const secs = Math.ceil(tm / 10);
@@ -579,20 +714,33 @@ function updateHud(force) {
     const clock = $('#clock');
     clock.classList.toggle('x2', ph === 1);
     clock.classList.toggle('ot', ph === 2);
-    clock.classList.toggle('hurry', ph < 3 && secs <= 10 && (ph === 1 || ph === 2));
+    clock.classList.toggle('hurry', ph < 3 && secs <= 10);
     $('#elixir').classList.toggle('x2', ph === 1 || ph === 2);
-    if (lastHud.txt !== txt && secs <= 5 && secs > 0 && (ph === 1 || ph === 2) && S.state === 'playing') sfx('tick');
     lastHud.txt = txt; lastHud.ph = ph;
+  }
+  // cuenta atrás final: últimos 10 segundos en grande, con 3-2-1
+  if (S.state === 'playing' && ph < 3) {
+    const show10 = secs <= 10 && secs > 0;
+    const cd = $('#countdown');
+    if (show10 && secs !== S.lastCount) {
+      S.lastCount = secs;
+      cd.textContent = secs;
+      cd.className = secs <= 3 ? 'big' : '';
+      void cd.offsetWidth;
+      cd.classList.add('tickin');
+      sfx(secs <= 3 ? 'count3' : 'count');
+      if (secs <= 3) buzz(25);
+    } else if (!show10 && S.lastCount !== -1) {
+      S.lastCount = -1;
+      cd.className = 'hidden';
+    }
   }
   const c = S.hud.crowns, me = S.me;
   const cm = c[me], cf = c[1 - me];
   if (force || lastHud.cm !== cm) { $('#meCrowns b').textContent = cm; if (!force) bump('#meCrowns'); lastHud.cm = cm; }
   if (force || lastHud.cf !== cf) { $('#foeCrowns b').textContent = cf; if (!force) bump('#foeCrowns'); lastHud.cf = cf; }
 }
-function bump(sel) {
-  const e = $(sel);
-  e.classList.remove('bump'); void e.offsetWidth; e.classList.add('bump');
-}
+function bump(sel) { const e = $(sel); e.classList.remove('bump'); void e.offsetWidth; e.classList.add('bump'); }
 
 // ---------- Eventos de la vista (sonido, carteles) ----------
 function onViewEvent(ev) {
@@ -602,8 +750,17 @@ function onViewEvent(ev) {
     case 'proj': sfx('shoot'); break;
     case 'hit': sfx('hit'); break;
     case 'splash': sfx('splash'); break;
-    case 'spell': sfx('spell'); break;
+    case 'spin': sfx('splash'); break;
+    case 'lance': sfx('hit'); sfx('boom'); break;
+    case 'spell': if (CARDS[ev.c].spell.kind === 'fireball') sfx('spell'); break;
     case 'boom': sfx('boom'); buzz(35); break;
+    case 'volley': sfx('volley'); break;
+    case 'zap': sfx('zap'); buzz(40); break;
+    case 'freeze': sfx('freeze'); break;
+    case 'rage': sfx('rage'); break;
+    case 'charge': sfx('charge'); break;
+    case 'spawn': sfx('spawn'); break;
+    case 'quake': sfx('quake'); buzz(50); break;
     case 'death': sfx('die'); break;
     case 'tower':
       sfx('tower');
@@ -616,13 +773,27 @@ function onViewEvent(ev) {
     case 'king': sfx('king'); break;
     case 'phase':
       sfx('phase');
-      if (ev.ph === 1) banner('¡Elixir x2!', 'purple');
-      else if (ev.ph === 2) banner('Muerte súbita', 'red');
+      if (ev.ph === 1) { banner('¡Último minuto! Elixir x2', 'purple'); sfx('minute'); }
+      else if (ev.ph === 2) { banner('¡Muerte súbita!', 'red'); sfx('horn'); S.lastCount = -1; $('#countdown').className = 'hidden'; }
       break;
-    case 'end':
-      handleEnd(ev.w, ev.r);
-      break;
+    case 'end': handleEnd(ev.w, ev.r); break;
   }
+}
+
+function recordResult(res) {
+  if (S.mode !== 'host' && S.mode !== 'guest') return null;
+  const delta = res === 'win' ? TROPHY_WIN : res === 'loss' ? -Math.min(TROPHY_LOSS, PF.trophies) : 0;
+  PF.trophies = Math.max(0, PF.trophies + delta);
+  PF.best = Math.max(PF.best || 0, PF.trophies);
+  if (res === 'win') PF.wins++; else if (res === 'loss') PF.losses++;
+  const key = S.foeName.trim().toLowerCase() || 'rival';
+  const h = PF.history[key] || { name: S.foeName, w: 0, l: 0, d: 0 };
+  h.name = S.foeName;
+  if (res === 'win') h.w++; else if (res === 'loss') h.l++; else h.d++;
+  h.last = Date.now();
+  PF.history[key] = h;
+  saveProfile();
+  return { delta, h };
 }
 
 function handleEnd(w, reason = '') {
@@ -631,27 +802,37 @@ function handleEnd(w, reason = '') {
   S.state = 'over';
   S.ghost = null; S.sel = -1;
   renderHand();
+  $('#countdown').className = 'hidden';
+  const me = S.me;
+  const win = w === me, draw = w === 2;
+  const rec = recordResult(win ? 'win' : draw ? 'draw' : 'loss');
+  if (reason === 'time' || reason === 'tiebreak') { banner('¡Tiempo!', ''); sfx('horn'); }
+  else if (reason !== 'surrender') { banner(win ? '¡Victoria!' : draw ? 'Empate' : 'Derrota', win ? '' : 'red'); }
   setTimeout(() => {
     if (S.state !== 'over') return;
-    const me = S.me;
     const c = S.hud.crowns;
-    const win = w === me, draw = w === 2;
     sfx(win ? 'win' : draw ? 'draw' : 'lose');
     let text;
     if (reason === 'surrender') text = win ? `${S.foeName} se ha rendido.` : 'Te has rendido.';
-    else if (reason === 'tiebreak') text = win ? 'Desempate: tu torre más dañada ha aguantado más.' : 'Desempate: a tu torre más dañada le quedaba menos vida.';
+    else if (reason === 'tiebreak') text = win ? 'Desempate: tu torre más dañada ha aguantado más.' : draw ? 'Mismo daño en las torres. Toca revancha.' : 'Desempate: a tu torre más dañada le quedaba menos vida.';
     else if (win) text = c[me] === 3 ? '¡Has tirado la torre del rey!' : `Ganas ${c[me]} a ${c[1 - me]} en coronas.`;
     else if (draw) text = 'Nadie ha conseguido ventaja. Toca revancha.';
     else text = c[1 - me] === 3 ? 'Han tirado tu torre del rey.' : `Pierdes ${c[me]} a ${c[1 - me]} en coronas.`;
-    showOverlay({ title: win ? '¡Victoria!' : draw ? 'Empate' : 'Derrota', lose: !win && !draw, text, rematch: true });
-  }, 1700);
+    showOverlay({ title: win ? '¡Victoria!' : draw ? 'Empate' : 'Derrota', lose: !win && !draw, text, rematch: true, delta: rec });
+  }, 1900);
 }
 
-function showOverlay({ title, lose, text, rematch }) {
+function showOverlay({ title, lose, text, rematch, delta }) {
   const c = S.hud.crowns, me = S.me;
   $('#resTitle').textContent = title;
   $('#resTitle').classList.toggle('lose', !!lose);
-  $('#resCrowns').innerHTML = `<span style="color:#a8ceff">${esc(S.myName)} ${c[me]}</span><span class="vsx">contra</span><span style="color:#ff9a9a">${c[1 - me]} ${esc(S.foeName)}</span>`;
+  $('#resCrowns').innerHTML = `<span class="me">${esc(S.myName)} ${c[me]}</span><span class="vsx">contra</span><span class="foe">${c[1 - me]} ${esc(S.foeName)}</span>`;
+  const rt = $('#resTrophies');
+  if (delta) {
+    rt.classList.remove('hidden');
+    const d = delta.delta;
+    rt.innerHTML = `<b class="${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${d > 0 ? '+' : ''}${d} 🏆</b><span>Ahora tienes ${PF.trophies} · ${rankOf(PF.trophies).name}</span><span>Contra ${esc(delta.h.name)}: ${delta.h.w}V · ${delta.h.l}D${delta.h.d ? ' · ' + delta.h.d + 'E' : ''}</span>`;
+  } else rt.classList.add('hidden');
   $('#resText').textContent = text;
   const rb = $('#btnRematch');
   rb.classList.toggle('hidden', !rematch);
@@ -670,8 +851,6 @@ function updateRematchInfo() {
   else info.textContent = '';
 }
 
-function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-
 function initOverlay() {
   $('#btnRematch').onclick = () => {
     unlockAudio(); sfx('select');
@@ -688,7 +867,15 @@ function initOverlay() {
     sfx('select');
     leaveRoom();
     S.state = 'menu'; S.mode = null; S.game = null; S.bot = null;
+    renderProfile();
     show('menu');
+  };
+  $('#confirmNo').onclick = () => $('#confirm').classList.add('hidden');
+  $('#confirmYes').onclick = () => {
+    $('#confirm').classList.add('hidden');
+    if (S.state !== 'playing') return;
+    if (S.mode === 'guest') send({ t: 'surrender' });
+    else if (S.game) S.game.finish(1, 'surrender');
   };
 }
 
@@ -707,7 +894,8 @@ function canPlaceMe(ci, x, y) {
     if (t.hp > 0) solids.push(t);
   }
   for (const e of f.ents.values()) {
-    if (CARDS[e[1]].type === 'building') solids.push({ kind: 'building', x: e[3] / 20, y: e[4] / 20, radius: CARDS[e[1]].unit.radius });
+    const u = UNITS[Object.keys(UNITS)[e[1]]];
+    if (u && u.building) solids.push({ kind: 'building', x: e[3] / 20, y: e[4] / 20, radius: u.radius });
   }
   return placementOk(S.me, ci, x, y, towers, solids);
 }
@@ -729,7 +917,7 @@ function ghostAt(clientX, clientY, lift) {
   if (slot < 0 || ci < 0) { S.ghost = null; return; }
   const r = $('#cv').getBoundingClientRect();
   const px = clientX - r.left;
-  const py = clientY - r.top - (lift ? S.view.S * 1.2 : 0);
+  const py = clientY - r.top - (lift ? S.view.S * 1.3 : 0);
   if (!S.view.inArena(px, py)) { S.ghost = null; return; }
   const [wx, wy] = S.view.toWorld(px, py);
   let x, y;
@@ -756,7 +944,8 @@ function tryPlay(slot, x, y) {
     send({ t: 'play', s: seq, slot, c: ci, x, y });
     S.pending.push({ seq, cost: c.cost, at: performance.now() });
     S.hud.el -= c.cost;
-    S.view.addLocalDeploy(ci, x, y);
+    // predicción: la tropa empieza a caer ya, sin esperar al anfitrión
+    if (S.view.predict) S.view.predict(ci, ...(c.type === 'spell' ? [x, y] : snapPos(x, y)));
     S.hud.hand = S.hud.hand.slice();
     S.hud.hand[slot] = S.hud.next ?? -1;
     S.hud.next = -1;
@@ -814,7 +1003,6 @@ function initInput() {
     ghostAt(e.clientX, e.clientY, false);
   });
 
-  // emoticonos
   const pad = $('#emotePad');
   pad.innerHTML = EMOTES.map((e, i) => `<button data-i="${i}">${e}</button>`).join('');
   $('#emoteBtn').onclick = () => { unlockAudio(); pad.classList.toggle('hidden'); };
@@ -830,22 +1018,21 @@ function initInput() {
     sfx('emote');
     send({ t: 'emote', i });
   };
+  $('#flagBtn').onclick = () => { if (S.state === 'playing') $('#confirm').classList.remove('hidden'); };
 
-  $('#flagBtn').onclick = () => {
-    if (S.state !== 'playing') return;
-    if (!confirm('¿Rendirte y dar la partida por perdida?')) return;
-    if (S.mode === 'guest') send({ t: 'surrender' });
-    else if (S.game) S.game.finish(1, 'surrender');
-  };
-
-  window.addEventListener('resize', () => { if (S.view) S.view.resize(); });
-  window.addEventListener('orientationchange', () => setTimeout(() => S.view && S.view.resize(), 300));
+  const relayout = () => { if (S.view && S.state !== 'menu') S.view.resize(); };
+  window.addEventListener('resize', relayout);
+  window.addEventListener('orientationchange', () => setTimeout(relayout, 300));
 }
 
-// ---------- Render ----------
-function frame() {
+// ---------- Bucle de dibujo ----------
+function frame(now) {
   requestAnimationFrame(frame);
+  if (S.mode !== 'guest') simStep();
   if ((S.state !== 'playing' && S.state !== 'over') || !S.view) return;
+  // modo ahorro: 30 FPS
+  if (PF.quality === 'ahorro' && now - S.lastRenderAt < 30) return;
+  S.lastRenderAt = now;
   let rt;
   if (S.mode === 'guest') rt = guestRenderTick();
   else {
@@ -858,12 +1045,25 @@ function frame() {
 }
 
 // ---------- Inicio ----------
+let View3D = null;
+const load3D = params.has('2d') ? Promise.resolve() : import('./render3d.js')
+  .then((m) => { if (m.webglAvailable()) View3D = m.View3D; })
+  .catch((e) => console.warn('Sin 3D, uso el modo 2D', e));
+
 initMenu();
 initOverlay();
 initInput();
 buildHandEls();
 requestAnimationFrame(frame);
 window.addEventListener('pagehide', () => leaveRoom());
-
-// Ganchos para pruebas automáticas
-window.__ad = S;
+// el motor 3D se prepara en segundo plano mientras estás en el menú
+load3D.then(() => {
+  const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300));
+  idle(() => { if (!S.view) { try { ensureView(); } catch (e) { console.warn(e); } } });
+});
+// cartas de tu mazo precargadas
+for (const c of myDeck()) { const i = new Image(); i.src = art(c); }
+// caché para abrir al instante y jugar sin red de carga
+if ('serviceWorker' in navigator && location.protocol === 'https:' && !params.has('nosw')) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}

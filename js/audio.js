@@ -57,7 +57,7 @@ function noise(dur, vol, type, f0, f1, delay = 0, q = 1) {
   s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.05);
 }
 
-const GAP = { hit: 0.05, shoot: 0.07, die: 0.06, splash: 0.08, deploy: 0.05 };
+const GAP = { hit: 0.05, shoot: 0.07, die: 0.06, splash: 0.08, deploy: 0.05, spawn: 0.15, charge: 0.3 };
 
 export function sfx(name) {
   if (muted || !ctx || ctx.state !== 'running') return;
@@ -81,6 +81,20 @@ export function sfx(name) {
       break;
     case 'king': tone('square', 330, 330, 0.12, 0.08); tone('square', 440, 440, 0.18, 0.08, 0.12); break;
     case 'tick': tone('sine', 880, 880, 0.12, 0.2); break;
+    case 'count': tone('sine', 740, 740, 0.09, 0.16); break;
+    case 'count3': tone('square', 988, 988, 0.16, 0.14); tone('sine', 494, 494, 0.2, 0.2); break;
+    case 'horn':
+      tone('sawtooth', 220, 220, 0.9, 0.12); tone('sawtooth', 277, 277, 0.9, 0.08, 0.02); tone('sawtooth', 330, 330, 0.9, 0.07, 0.04);
+      noise(0.5, 0.08, 'lowpass', 900, 200);
+      break;
+    case 'minute': [659, 784].forEach((f, i) => tone('triangle', f, f, 0.2, 0.15, i * 0.12)); break;
+    case 'zap': noise(0.35, 0.35, 'highpass', 900, 3000); tone('sawtooth', 120, 60, 0.3, 0.2); break;
+    case 'freeze': noise(0.6, 0.18, 'bandpass', 3000, 6000, 0, 4); [1320, 1760, 2093].forEach((f, i) => tone('sine', f, f, 0.25, 0.06, i * 0.05)); break;
+    case 'rage': tone('sawtooth', 180, 360, 0.35, 0.12); noise(0.3, 0.1, 'bandpass', 600, 1200); break;
+    case 'charge': tone('triangle', 300, 600, 0.25, 0.1); break;
+    case 'spawn': tone('sine', 400, 260, 0.1, 0.07); break;
+    case 'volley': noise(0.4, 0.14, 'highpass', 2500, 5000); break;
+    case 'quake': noise(0.8, 0.45, 'lowpass', 500, 60); tone('sine', 60, 30, 0.7, 0.4); break;
     case 'go': tone('square', 660, 660, 0.12, 0.12); tone('square', 990, 990, 0.3, 0.14, 0.1); break;
     case 'phase': [523, 659, 784].forEach((f, i) => tone('triangle', f, f, 0.18, 0.15, i * 0.09)); break;
     case 'emote': tone('sine', 700, 1100, 0.1, 0.15); break;

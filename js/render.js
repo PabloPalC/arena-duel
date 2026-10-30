@@ -1,5 +1,14 @@
 // Arena Duel — dibujo de la arena, tropas y efectos (Canvas 2D)
-import { W, H, RIVER_TOP, RIVER_BOT, BRIDGES, BRIDGE_HALF, CARDS, TOWERS, TOWER_LAYOUT, DT } from './data.js';
+import { W, H, RIVER_TOP, RIVER_BOT, BRIDGES, BRIDGE_HALF, CARDS, UNITS, UNIT_KEYS, TOWERS, TOWER_LAYOUT, DT } from './data.js';
+
+// Adaptadores: la vista 2D (plan B sin WebGL) dibuja fichas con iconos
+const SPELL_ICON = { fireball: '☄️', arrows: '🏹', lightning: '⚡', freeze: '❄️', rage: '📯' };
+const UCARD = UNIT_KEYS.map(k => ({ unit: UNITS[k], icon: UNITS[k].icon, type: UNITS[k].building ? 'building' : 'troop', count: 1 }));
+const DCARD = (i) => {
+  const c = CARDS[i];
+  if (c.type === 'spell') return { ...c, icon: SPELL_ICON[c.spell.kind] || '✨' };
+  return { ...c, unit: UNITS[c.unit], icon: UNITS[c.unit].icon };
+};
 import { mirror } from './sim.js';
 
 const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
@@ -206,6 +215,11 @@ export class View {
   }
   latest() { return this.frames[this.frames.length - 1]; }
 
+  predict(card, x, y) { this.addLocalDeploy(card, x, y); }
+  pushEvents(evs) { for (const ev of evs) this.queue.push(ev); }
+  warm() {}
+  setQuality() {}
+  screenOfTower(i) { const [x, y] = this.towerPos[i]; const [sx, sy] = this.toScreen(x, y); return [sx, sy - this.S * 2]; }
   addLocalDeploy(card, x, y) {
     this.marks.push({ x, y, card, t: 0, max: 0.8, local: true, owner: this.me });
   }
@@ -341,7 +355,7 @@ export class View {
         x = lerp(ea[3], ebb[3], al) / 20; y = lerp(ea[4], ebb[4], al) / 20;
         moving = Math.hypot(ebb[3] - ea[3], ebb[4] - ea[4]);
       } else { const e = ebb || ea; x = e[3] / 20; y = e[4] / 20; }
-      const card = CARDS[eb[1]];
+      const card = UCARD[eb[1]];
       const air = !!(card.unit && card.unit.air);
       pos.set(id, { x, y, air });
       seen.add(id);
@@ -424,7 +438,7 @@ export class View {
   }
 
   drawZones(ghost, frame) {
-    const card = CARDS[ghost.card];
+    const card = DCARD(ghost.card);
     if (card.type === 'spell') return;
     const ctx = this.ctx, S = this.S;
     ctx.fillStyle = 'rgba(230,40,40,0.22)';
@@ -462,7 +476,7 @@ export class View {
 
   drawGhost(gh) {
     const ctx = this.ctx, S = this.S;
-    const card = CARDS[gh.card];
+    const card = DCARD(gh.card);
     const [sx, sy] = this.toScreen(gh.x, gh.y);
     ctx.save();
     if (card.type === 'spell') {
@@ -523,7 +537,7 @@ export class View {
       ctx.strokeStyle = '#bcd8ff';
       ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(sx, sy, S * (0.4 + k * 0.9), 0, 7); ctx.stroke();
-      const sp = emojiSprite(CARDS[m.card].unitIcon || CARDS[m.card].icon, S * 1.0);
+      const sp = emojiSprite(DCARD(m.card).icon, S * 1.0);
       ctx.globalAlpha = 0.6 * (1 - k);
       ctx.drawImage(sp, sx - sp.width / 2, sy - sp.height / 2 - S * 0.3 * (1 - k));
       ctx.restore();

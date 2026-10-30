@@ -70,7 +70,7 @@ function wrapConn(conn, kind) {
     kind,
     onmessage: null, onclose: null,
     send(o) { try { if (conn.open) conn.send(o); } catch { /* */ } },
-    close() { try { conn.close(); } catch { /* */ } },
+    close() { tr.onclose = null; tr.onmessage = null; try { conn.close(); } catch { /* */ } },
   };
   conn.on('data', (d) => tr.onmessage && tr.onmessage(d));
   conn.on('close', () => tr.onclose && tr.onclose());
@@ -86,13 +86,13 @@ async function peerJoin(code) {
     const fail = (e) => { if (!done) { done = true; try { peer.destroy(); } catch { /* */ } rej(e); } };
     peer.on('error', fail);
     peer.on('open', () => {
-      const conn = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'json' });
+      const conn = peer.connect(PEER_PREFIX + code, { reliable: false, serialization: 'json' });
       conn.on('open', () => {
         if (done) return;
         done = true;
         const tr = wrapConn(conn, 'p2p');
         const close = tr.close;
-        tr.close = () => { close(); try { peer.destroy(); } catch { /* */ } };
+        tr.close = () => { close(); setTimeout(() => { try { peer.destroy(); } catch { /* */ } }, 400); };
         res(tr);
       });
       conn.on('error', fail);
@@ -141,7 +141,7 @@ function relayTransport(room, peerId) {
   const tr = {
     kind: 'relay', onmessage: null, onclose: null,
     send(o) { room.publish({ ...o, _to: peerId }); },
-    close() { room.publish({ t: '_bye', _to: peerId }); room.close(); },
+    close(silent) { tr.onclose = null; tr.onmessage = null; if (!silent) room.publish({ t: '_bye', _to: peerId }); setTimeout(() => room.close(), 200); },
   };
   room.onraw = (m) => {
     if (m.t === '_hello') {
@@ -235,8 +235,8 @@ class LocalBus {
   static wrap(ch, to) {
     const tr = {
       kind: 'local', onmessage: null, onclose: null,
-      send(o) { ch.postMessage({ ...o, _to: to }); },
-      close() { ch.postMessage({ t: '_bye', _to: to }); ch.close(); },
+      send(o) { try { ch.postMessage({ ...o, _to: to }); } catch { /* */ } },
+      close(silent) { tr.onclose = null; tr.onmessage = null; try { if (!silent) ch.postMessage({ t: '_bye', _to: to }); ch.close(); } catch { /* */ } },
     };
     const me = to === 'g' ? 'h' : 'g';
     ch.onmessage = (e) => {
@@ -250,69 +250,80 @@ class LocalBus {
 }
 
 // ---------- API pública ----------
-export async function hostRoom(onGuest, onStatus) {
+// La sala escucha a la vez por conexión directa y por relé. El código se enseña al instante.
+// Manda la vía por la que llega el primer "hello" del invitado; las demás se cierran.
+export async function hostRoom(onGuest, onStatus, onCode) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const code = makeCode();
-    let connected = false;
+    onCode && onCode(code);
+    let chosen = null;
     const parts = [];
+    const cands = [];
     const accept = (tr, extra) => {
-      if (connected) { tr.send({ t: 'full' }); setTimeout(() => tr.close(), 300); return; }
-      connected = true;
-      // cerrar los demás canales de escucha
-      for (const p of parts) {
-        if (p.obj === extra?.host && extra?.room) p.obj.keepOnly(extra.room);
-        else if (p.kind !== tr.kind) p.obj.close();
-      }
-      onGuest(tr);
+      tr._extra = extra;
+      cands.push(tr);
+      tr.onclose = () => {};
+      tr.onmessage = (m) => {
+        if (m.t !== 'hello') return;
+        if (chosen && chosen !== tr) { tr.send({ t: 'full' }); setTimeout(() => tr.close(true), 300); return; }
+        chosen = tr;
+        for (const c of cands) if (c !== tr) c.close(true);
+        for (const p of parts) {
+          if (p.obj === extra?.host && extra?.room) p.obj.keepOnly(extra.room);
+          else if (p.kind !== tr.kind) p.obj.close();
+        }
+        onGuest(tr, m);
+      };
     };
     if (FORCE === 'local') {
       parts.push({ kind: 'local', obj: LocalBus.host(code, (tr) => accept(tr)) });
+      onStatus && onStatus(['local']);
       return { code, close: () => parts.forEach(p => p.obj.close()), via: ['local'] };
     }
     const via = [];
     let idTaken = false;
+    const tasks = [];
     if (FORCE !== 'relay') {
       const ph = new PeerHost(code, (tr) => accept(tr));
-      try {
-        await withTimeout(ph.start(), 9000, 'servidor p2p sin respuesta');
-        parts.push({ kind: 'p2p', obj: ph });
-        via.push('p2p');
-      } catch (e) {
-        ph.close();
-        if (e && e.type === 'unavailable-id') idTaken = true;
-      }
+      tasks.push(withTimeout(ph.start(), 9000, 'servidor p2p sin respuesta')
+        .then(() => { parts.push({ kind: 'p2p', obj: ph }); via.push('p2p'); onStatus && onStatus(via.slice()); })
+        .catch((e) => { ph.close(); if (e && e.type === 'unavailable-id') idTaken = true; }));
     }
-    if (idTaken) continue;
     if (FORCE !== 'p2p') {
       const rh = new RelayHost(code, (tr, room) => accept(tr, { host: rh, room }));
-      try {
-        await rh.start();
-        parts.push({ kind: 'relay', obj: rh });
-        via.push('relay');
-      } catch { rh.close(); }
+      tasks.push(rh.start()
+        .then(() => { parts.push({ kind: 'relay', obj: rh }); via.push('relay'); onStatus && onStatus(via.slice()); })
+        .catch(() => rh.close()));
     }
+    await Promise.all(tasks);
+    if (idTaken) { parts.forEach(p => p.obj.close()); continue; }
     if (!via.length) throw new Error('No hay conexión a internet o los servidores no responden.');
-    onStatus && onStatus(via);
     return { code, via, close: () => parts.forEach(p => p.obj.close()) };
   }
   throw new Error('No se pudo crear la sala, inténtalo otra vez.');
 }
 
+// El invitado prueba a la vez conexión directa y relé, y se queda con la directa si llega a tiempo.
 export async function joinRoom(code, onStatus) {
   if (FORCE === 'local') return LocalBus.join(code);
-  if (FORCE !== 'relay') {
-    onStatus && onStatus('Conectando directo…');
-    try {
-      return await withTimeout(peerJoin(code), 7000, 'p2p sin respuesta');
-    } catch (e) {
-      if (FORCE === 'p2p') throw new Error('No se encontró la sala ' + code);
-    }
+  onStatus && onStatus('Buscando la sala…');
+  const p2pP = FORCE === 'relay' ? Promise.reject(new Error('off')) : withTimeout(peerJoin(code), 8000, 'p2p sin respuesta');
+  const relayP = FORCE === 'p2p' ? Promise.reject(new Error('off')) : relayJoin(code);
+  const settle = (p, kind) => p.then((v) => ({ ok: true, v, kind }), (e) => ({ ok: false, e, kind }));
+  const sP = settle(p2pP, 'p2p'), sR = settle(relayP, 'relay');
+  const drop = (sp) => sp.then((r) => { if (r.ok) r.v.close(true); });
+  const first = await Promise.race([sP, sR]);
+  if (first.ok && first.kind === 'p2p') { drop(sR); return first.v; }
+  if (first.ok && first.kind === 'relay') {
+    onStatus && onStatus('Conectado. Probando conexión directa…');
+    const p2p = await Promise.race([sP, new Promise(r => setTimeout(() => r({ ok: false }), 1800))]);
+    if (p2p.ok) { first.v.close(true); return p2p.v; }
+    drop(sP);
+    return first.v;
   }
-  onStatus && onStatus('Probando por relé…');
-  try {
-    return await relayJoin(code);
-  } catch (e) {
-    if (/llena/.test(e.message)) throw e;
-    throw new Error('No se encontró la sala ' + code + '. Revisa el código y que tu amigo siga en la sala.');
-  }
+  const other = await (first.kind === 'p2p' ? sR : sP);
+  if (other.ok) return other.v;
+  const err = [first.e, other.e].find(e => e && /llena/.test(e.message));
+  if (err) throw err;
+  throw new Error('No se encontró la sala ' + code + '. Revisa el código y que tu amigo siga en la sala.');
 }

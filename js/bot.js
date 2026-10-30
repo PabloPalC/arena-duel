@@ -1,18 +1,46 @@
 // Arena Duel — rival controlado por la máquina (modo práctica)
-import { W, H, CARDS, CARD_INDEX, ELIXIR_RATE, ELIXIR_MAX } from './data.js';
+// Juega con cualquier mazo: clasifica cada carta por su papel y decide por puntuación.
+import { W, H, CARDS, UNITS, CARD_INDEX, ELIXIR_RATE, ELIXIR_MAX } from './data.js';
 import { mirror } from './sim.js';
 
 const LEVELS = [
-  // fácil: lento, despistado, sin combos
-  { react: 1.9, push: 10, jitter: 1.8, smart: 0, ignoreSmall: 0 },
-  // normal
-  { react: 1.0, push: 8.5, jitter: 0.6, smart: 1, ignoreSmall: 300 },
-  // difícil: rápido, combos tanque + apoyo, hechizos con cabeza
+  // Escudero: lento, despistado, sin hechizos con cabeza
+  { react: 1.9, push: 10, jitter: 1.8, smart: 0, ignoreSmall: 0, bonus: 0 },
+  // Caballero
+  { react: 1.0, push: 8.5, jitter: 0.6, smart: 1, ignoreSmall: 300, bonus: 0 },
+  // Rey Negro: rápido, combos, y recarga un 20 % más de elixir
   { react: 0.45, push: 7.5, jitter: 0.2, smart: 2, ignoreSmall: 380, bonus: 0.2 },
 ];
 
-const C = CARD_INDEX;
-const RANGED = [C.archers, C.wizard, C.dragon];
+const ids = (...a) => a.map(id => CARD_INDEX[id]);
+export const BOT_DECKS = [
+  ids('knight', 'archers', 'goblins', 'skeletons', 'giant', 'fireball', 'arrows', 'ballista'),
+  ids('knight', 'arquebusier', 'bats', 'wolfrider', 'pyromancer', 'fireball', 'arrows', 'crypt'),
+  ids('golem', 'necromancer', 'draco', 'berserker', 'frost', 'lightning', 'arrows', 'rage'),
+  ids('lancer', 'automaton', 'legion', 'grenadier', 'archers', 'freeze', 'fireball', 'arcane'),
+  ids('giant', 'barbarians', 'draco', 'goblins', 'arquebusier', 'lightning', 'arrows', 'crypt'),
+];
+
+// Perfil de cada carta (se calcula una vez)
+const PROFILE = CARDS.map((c) => {
+  if (c.type === 'spell') return { spell: c.spell.kind, cost: c.cost };
+  const u = UNITS[c.unit];
+  const n = c.count || 1;
+  const hpTotal = u.hp * n;
+  const dps = (u.dmg / u.hitSpeed) * n * (u.ramp ? 6 : 1);
+  return {
+    cost: c.cost, n, u, hpTotal, dps,
+    air: !!u.air,
+    hitsAir: u.targets === 'both',
+    building: !!u.building,
+    winCon: u.targets === 'buildings',
+    tank: hpTotal >= 1800,
+    swarm: n >= 3,
+    splash: !!(u.splash || u.spin),
+    ranged: (u.range || 0) >= 3,
+    spawner: !!u.spawn && !!u.building,
+  };
+});
 
 export class Bot {
   constructor(game, p = 1, level = 1) {
@@ -20,7 +48,6 @@ export class Bot {
     this.p = p;
     this.L = LEVELS[level] || LEVELS[1];
     this.cool = 2.5 + Math.random();
-    this.push = null;
   }
 
   // Coordenadas relativas: el bot "juega abajo" como el jugador 0
@@ -49,7 +76,6 @@ export class Bot {
     const g = this.g;
     if (g.phase === 'over') return;
     if (this.L.bonus) {
-      // el Rey Negro hace un poco de trampa: recarga elixir un 20 % más rápido
       const mult = g.phase === 'normal' ? 1 : g.phase === 'double' ? 2 : 3;
       g.elixir[this.p] = Math.min(ELIXIR_MAX, g.elixir[this.p] + ELIXIR_RATE * mult * this.L.bonus * dt);
     }
@@ -63,30 +89,71 @@ export class Bot {
     const g = this.g, p = this.p, L = this.L;
     const el = g.elixir[p], hand = g.hand(p);
     const has = (c, extra = 0) => hand.includes(c) && el >= CARDS[c].cost + extra;
+    const avail = hand.filter(c => el >= CARDS[c].cost);
 
     const enemies = [], mine = [];
     for (const e of g.entities) {
       if (e.kind === 'tower' || e.hp <= 0) continue;
       const [x, y] = this.rel(e.x, e.y);
-      (e.owner === p ? mine : enemies).push({ e, x, y, card: e.card });
+      (e.owner === p ? mine : enemies).push({ e, x, y });
     }
+    const ucost = (e) => (e.def ? (CARDS.find(c => c.unit === e.def.key) || { cost: 2 }).cost / Math.max(1, (CARDS.find(c => c.unit === e.def.key) || { count: 1 }).count) : 1);
 
-    // 1) Bola de fuego: grupos valiosos o rematar torre
-    if (L.smart >= 1 && has(C.fireball)) {
-      let best = null, bv = 0;
-      for (const a of enemies) {
-        let v = 0;
-        for (const b of enemies) {
-          if (Math.hypot(a.x - b.x, a.y - b.y) <= 2.3) v += Math.min(CARDS[b.card].cost / (CARDS[b.card].count || 1), b.e.hp / 120);
-        }
-        if (v > bv) { bv = v; best = a; }
-      }
-      if (best && bv >= (L.smart >= 2 ? 4.5 : 6)) {
-        if (this.tryPlay(C.fireball, best.x, best.y - (best.e.speed ? 0.6 : 0))) return;
-      }
-      if (L.smart >= 2) {
-        for (const t of g.towers[1 - p]) {
-          if (t.hp > 0 && t.hp <= 210) { const [x, y] = this.rel(t.x, t.y); if (this.tryPlay(C.fireball, x, y)) return; }
+    // 1) Hechizos
+    if (L.smart >= 1) {
+      for (const c of avail) {
+        const pr = PROFILE[c];
+        if (!pr.spell) continue;
+        const sp = CARDS[c].spell;
+        if (pr.spell === 'fireball' || pr.spell === 'arrows' || pr.spell === 'lightning') {
+          let best = null, bv = 0;
+          for (const a of enemies) {
+            let v = 0;
+            const inR = enemies.filter(b => Math.hypot(a.x - b.x, a.y - b.y) <= sp.radius * 0.9);
+            if (pr.spell === 'lightning') {
+              inR.sort((m, n) => n.e.hp - m.e.hp);
+              for (const b of inR.slice(0, 3)) v += Math.min(ucost(b.e) * 1.3, b.e.hp / 250);
+            } else {
+              for (const b of inR) v += Math.min(ucost(b.e), b.e.hp / (sp.dmg * 0.6)) * (b.e.hp <= sp.dmg ? 1.2 : 0.7);
+            }
+            if (v > bv) { bv = v; best = a; }
+          }
+          const need = CARDS[c].cost + (L.smart >= 2 ? 0.5 : 1.5);
+          if (best && bv >= need) {
+            const lead = best.e.speed && !best.e.inRange ? 0.7 : 0;
+            if (this.tryPlay(c, best.x, best.y - lead)) return;
+          }
+          if (L.smart >= 2 && sp.dmg) {
+            for (const t of g.towers[1 - p]) {
+              if (t.hp > 0 && t.hp <= sp.dmg * sp.towerMult) {
+                const [x, y] = this.rel(t.x, t.y);
+                if (this.tryPlay(c, x, y)) return;
+              }
+            }
+          }
+        } else if (pr.spell === 'freeze') {
+          // congelar defensores (y la torre) cuando mi ataque llega a la torre
+          const attackers = mine.filter(a => a.y < 10.5 && !(a.e.deploy > 0));
+          const atkHp = attackers.reduce((s, a) => s + a.e.hp, 0);
+          if (attackers.length && atkHp >= 1000) {
+            const lead = attackers.sort((a, b) => a.y - b.y)[0];
+            if (this.tryPlay(c, lead.x, lead.y - 1.2)) return;
+          }
+          // o frenar en seco un ataque gordo contra mi torre
+          const danger = enemies.filter(b => b.y > 20);
+          if (danger.reduce((s, b) => s + b.e.hp, 0) >= 2500 && danger.length >= 2) {
+            const cx = danger.reduce((s, b) => s + b.x, 0) / danger.length;
+            const cy = danger.reduce((s, b) => s + b.y, 0) / danger.length;
+            if (this.tryPlay(c, cx, cy)) return;
+          }
+        } else if (pr.spell === 'rage') {
+          const pushing = mine.filter(a => a.y < 19 && !(a.e.deploy > 0) && a.e.kind === 'unit');
+          const val = pushing.reduce((s, a) => s + a.e.hp, 0);
+          if (pushing.length >= 2 && val >= 1500) {
+            const cx = pushing.reduce((s, a) => s + a.x, 0) / pushing.length;
+            const cy = pushing.reduce((s, a) => s + a.y, 0) / pushing.length - 1;
+            if (this.tryPlay(c, cx, cy)) return;
+          }
         }
       }
     }
@@ -97,80 +164,91 @@ export class Bot {
       const total = threats.reduce((s, a) => s + a.e.hp, 0);
       if (total < L.ignoreSmall && el < 8) return; // que la torre se encargue
       const t = threats[0];
-      const air = threats.some(a => a.e.air);
-      const big = threats.find(a => a.card === C.golem);
-      const swarm = threats.filter(a => a.card === C.goblins || a.card === C.archers).length >= 2;
-      const laneX = t.x < W / 2 ? 3.5 : 14.5;
-      let order;
-      if (L.smart === 0) {
-        order = [C.knight, C.goblins, C.archers, C.dragon, C.wizard, C.ballista, C.golem].sort(() => Math.random() - 0.5);
-      } else {
-        order = [];
-        if (air) order.push(C.archers, C.wizard, C.dragon);
-        if (big) order.push(C.ballista, C.goblins, C.knight, C.wizard, C.archers);
-        if (swarm) order.push(C.wizard, C.dragon, C.knight);
-        order.push(C.knight, C.goblins, C.archers, C.dragon, C.wizard, C.ballista);
+      const air = threats.some(a => a.e.air), allAir = threats.every(a => a.e.air);
+      const big = threats.some(a => a.e.hp >= 1800);
+      const winCon = threats.some(a => a.e.targets === 'buildings');
+      const swarm = threats.length >= 3;
+      let best = -1, bs = -1e9;
+      for (const c of avail) {
+        const pr = PROFILE[c];
+        if (pr.spell) continue;
+        if (allAir && !pr.hitsAir) continue;
+        let s = 10 - pr.cost * 1.2;
+        if (L.smart === 0) s = Math.random() * 10;
+        else {
+          if (air && pr.hitsAir) s += 6;
+          if (swarm && pr.splash) s += 6;
+          if (swarm && pr.n === 1 && !pr.splash && pr.hpTotal < 1200) s -= 4;
+          if (big && (pr.dps > 250 || pr.swarm)) s += 5;
+          if (winCon && pr.building) s += 6;
+          if (winCon && pr.swarm) s += 3;
+          if (pr.winCon) s -= 8; // un gigante no defiende
+          if (pr.spawner) s -= 2;
+        }
+        if (s > bs) { bs = s; best = c; }
       }
-      for (const c of order) {
-        if (!has(c)) continue;
-        if (air && L.smart >= 1 && !RANGED.includes(c) && threats.every(a => a.e.air)) continue;
-        const card = CARDS[c];
+      if (best >= 0) {
+        const pr = PROFILE[best];
+        const laneX = t.x < W / 2 ? 3.5 : 14.5;
         let x, y;
-        if (c === C.ballista) { x = W / 2 + (laneX < 9 ? -1 : 1); y = 21.5; }
-        else if (c === C.golem) { x = laneX; y = 29; }
-        else if (card.unit.proj) { x = laneX + (laneX < 9 ? 1.5 : -1.5); y = Math.min(28.5, Math.max(t.y, 18) + 3.5); }
+        if (pr.building) { x = W / 2 + (laneX < 9 ? -1 : 1); y = 21.5; }
+        else if (pr.winCon) { x = laneX; y = 29; }
+        else if (pr.ranged) { x = laneX + (laneX < 9 ? 1.5 : -1.5); y = Math.min(28.5, Math.max(t.y, 18) + 3.5); }
         else {
           // traer al rival hacia el centro para que disparen las dos torres
           x = L.smart >= 2 ? t.x + (W / 2 - t.x) * 0.25 : t.x;
           y = Math.max(17.6, Math.min(28.5, t.y + (L.smart >= 2 ? 2.5 : 1.5)));
         }
-        if (this.tryPlay(c, x, y)) return;
+        if (this.tryPlay(best, x, y)) return;
       }
       if (L.smart >= 1) return;
     }
 
-    // 3) Apoyar un ataque en marcha (contraataque o empuje con gólem)
-    const tank = mine.find(a => a.card === C.golem || a.card === C.knight);
-    const pushing = mine.filter(a => a.y < 22 && a.card !== C.ballista && !a.e.deploy);
-    if (L.smart >= 1 && pushing.length && tank) {
+    // 3) Apoyar un ataque en marcha
+    const tank = mine.find(a => PROFILE[CARDS.findIndex(c => c.unit === a.e.def?.key)]?.tank || a.e.targets === 'buildings');
+    if (L.smart >= 1 && tank && !(tank.e.deploy > 0)) {
       const laneX = tank.x < W / 2 ? 3.5 : 14.5;
       const need = L.smart >= 2 ? 0 : 1;
-      for (const c of [C.wizard, C.archers, C.dragon, C.goblins]) {
-        if (has(c, need) && mine.filter(a => a.card === c).length === 0) {
-          if (this.tryPlay(c, laneX, Math.max(18, tank.y + 2.5))) return;
-        }
+      const support = avail.filter(c => { const pr = PROFILE[c]; return !pr.spell && !pr.winCon && !pr.building && (pr.ranged || pr.splash || pr.swarm); });
+      for (const c of support) {
+        if (!has(c, need)) continue;
+        const unitKey = CARDS[c].unit;
+        if (mine.some(a => a.e.def && a.e.def.key === unitKey)) continue;
+        if (this.tryPlay(c, laneX, Math.max(18, tank.y + 2.5))) return;
       }
     }
 
-    // 4) Iniciar ataque
+    // 4) Edificio generador cuando sobra elixir
+    if (L.smart >= 1 && el >= 7.5 && !mine.some(a => a.e.kind === 'building')) {
+      const sp = avail.find(c => PROFILE[c].spawner);
+      if (sp !== undefined && this.tryPlay(sp, W / 2 + (Math.random() < 0.5 ? -2 : 2), 23)) return;
+    }
+
+    // 5) Iniciar ataque
     if (el >= L.push) {
       const et = g.towers[1 - p];
-      // carril de la torre rival más débil (en mis coordenadas)
       const lanes = et.slice(0, 2).map(t => ({ x: this.rel(t.x, t.y)[0], hp: t.hp > 0 ? t.hp : 9e9 }));
       lanes.sort((a, b) => a.hp - b.hp);
       const target = Math.random() < 0.75 ? lanes[0] : lanes[1];
       const laneX = target.x < W / 2 ? 3.5 : 14.5;
-      if (L.smart >= 1 && has(C.golem) && el >= (L.smart >= 2 ? 8 : 9.5)) {
-        if (this.tryPlay(C.golem, laneX, 30)) return;
+      const wc = avail.filter(c => PROFILE[c].winCon).sort((a, b) => CARDS[b].cost - CARDS[a].cost);
+      for (const c of wc) {
+        const heavy = CARDS[c].cost >= 6;
+        if (heavy && el < (L.smart >= 2 ? 8.5 : 9.8)) continue;
+        const fast = PROFILE[c].u.speed >= 2;
+        if (this.tryPlay(c, laneX, fast ? 17.6 : 30)) return;
       }
-      if (L.smart >= 2 && has(C.knight) && el >= 6) {
-        if (this.tryPlay(C.knight, laneX, 17.6)) {
-          const sup = [C.archers, C.wizard, C.goblins].find(c => has(c));
-          if (sup !== undefined) this.tryPlay(sup, laneX, 20);
-          return;
-        }
-      }
-      const opts = [C.knight, C.dragon, C.goblins, C.archers, C.wizard].filter(c => has(c));
+      const opts = avail.filter(c => { const pr = PROFILE[c]; return !pr.spell && !pr.building; });
       if (opts.length) {
         const c = opts[Math.floor(Math.random() * opts.length)];
-        if (this.tryPlay(c, laneX, CARDS[c].unit.proj ? 19.5 : 17.6)) return;
+        if (this.tryPlay(c, laneX, PROFILE[c].ranged ? 19.5 : 17.6)) return;
       }
     }
 
-    // 5) No desperdiciar elixir
+    // 6) No desperdiciar elixir
     if (el >= 9.8) {
-      const cheap = hand.filter(c => CARDS[c].type === 'troop').sort((a, b) => CARDS[a].cost - CARDS[b].cost)[0];
-      if (cheap !== undefined) this.tryPlay(cheap, Math.random() < 0.5 ? 6 : 12, 29);
+      const cheap = avail.filter(c => !PROFILE[c].spell).sort((a, b) => CARDS[a].cost - CARDS[b].cost)[0];
+      if (cheap !== undefined) this.tryPlay(cheap, Math.random() < 0.5 ? 6 : 12, PROFILE[cheap].building ? 22 : 29);
     }
   }
 }

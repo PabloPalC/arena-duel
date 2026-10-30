@@ -21,7 +21,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="preload" href="fonts/grenze-gotisch-latin-900-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/rubik-latin-800-normal.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="build/app-5e7f467519.css">
 </head>
 <body>
   <div id="app">
@@ -29,16 +29,25 @@
     <!-- ============ MENÚ ============ -->
     <section id="menu" class="screen">
       <div class="menu-inner">
+        <div class="profile" id="profileBar">
+          <div class="pf-name"><span id="pfName">Jugador</span><small id="pfRank">Aldeano</small></div>
+          <div class="pf-trophies"><span>🏆</span><b id="pfTrophies">0</b></div>
+        </div>
         <div class="crest" aria-hidden="true">
           <div class="crest-shield"><span>⚔️</span></div>
         </div>
         <h1 class="title">Arena Duel</h1>
-        <p class="tagline">Ocho cartas, tres torres y un amigo al que ganar.</p>
 
         <label class="field">
           <span>Tu nombre</span>
           <input id="nameInput" maxlength="14" autocomplete="off" spellcheck="false" placeholder="Escribe tu nombre">
         </label>
+
+        <button class="deck-preview" id="btnDeck" aria-label="Editar mazo">
+          <div class="dp-head"><span>Tu mazo</span><span class="dp-avg">💧 <b id="deckAvg">3.5</b> de media</span></div>
+          <div class="dp-cards" id="deckMini"></div>
+          <div class="dp-edit">Tocar para cambiar cartas</div>
+        </button>
 
         <div class="actions">
           <button class="btn gold" id="btnHost">Crear sala</button>
@@ -46,10 +55,11 @@
           <button class="btn green" id="btnPractice">Practicar contra la máquina</button>
         </div>
 
+        <div class="history" id="historyBox"></div>
+
         <div class="minor">
-          <button class="chip" id="btnDeck">📜 Ver el mazo</button>
           <button class="chip" id="btnHelp">❔ Cómo se juega</button>
-          <button class="chip" id="btnSound" aria-label="Sonido">🔊</button>
+          <button class="chip" id="btnSettings">⚙️ Ajustes</button>
         </div>
         <p class="credit">Hecho por <a href="https://palazondev.com" target="_blank" rel="noopener">palazondev</a></p>
       </div>
@@ -59,7 +69,7 @@
     <section id="practice" class="screen hidden">
       <div class="panel">
         <h2>Elige rival</h2>
-        <p class="muted">La máquina juega con tu mismo mazo.</p>
+        <p class="muted">Tú juegas con tu mazo. La máquina trae el suyo.</p>
         <div class="actions">
           <button class="btn green" data-level="0">Escudero <small>fácil</small></button>
           <button class="btn blue" data-level="1">Caballero <small>normal</small></button>
@@ -102,12 +112,31 @@
     </section>
 
     <!-- ============ MAZO ============ -->
-    <section id="deck" class="screen hidden">
-      <div class="panel wide">
-        <h2>El mazo</h2>
-        <p class="muted">Los dos jugáis con estas ocho cartas. Tienes 4 en la mano y la siguiente entra cuando juegas una.</p>
-        <div id="deckList" class="deck-list"></div>
-        <button class="link back">Volver</button>
+    <section id="deck" class="screen deck-screen hidden">
+      <div class="deck-wrap">
+        <header class="deck-top">
+          <button class="icon-btn back" aria-label="Volver">‹</button>
+          <h2>Mazo de batalla</h2>
+          <div class="deck-tabs" id="deckTabs">
+            <button data-slot="0">1</button><button data-slot="1">2</button><button data-slot="2">3</button>
+          </div>
+        </header>
+        <div class="deck-slots" id="deckSlots"></div>
+        <div class="deck-info"><span>💧 Elixir medio <b id="deckAvg2">3.5</b></span><span id="deckHint">Toca una carta para verla</span></div>
+        <div class="collection" id="collection"></div>
+      </div>
+      <div class="sheet hidden" id="cardSheet">
+        <div class="sheet-card">
+          <button class="icon-btn sheet-close" aria-label="Cerrar">✕</button>
+          <div class="sheet-art" id="sheetArt"></div>
+          <div class="sheet-body">
+            <div class="sheet-rarity" id="sheetRarity">Común</div>
+            <h3 id="sheetName">Caballero</h3>
+            <p id="sheetDesc"></p>
+            <dl id="sheetStats"></dl>
+            <button class="btn gold" id="sheetUse">Usar</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -122,17 +151,41 @@
           <li>Cada torre pequeña que tires es una <b>corona 👑</b>. Si cae la del rey, ganas al momento.</li>
           <li>Si tiras una torre, puedes soltar tropas en ese lado del campo rival.</li>
           <li>Empate a coronas: <b>muerte súbita</b>. La primera torre que caiga decide.</li>
+          <li>Ganar online da <b>+30 🏆</b>, perder quita 20. La práctica no cuenta.</li>
         </ul>
         <button class="link back">Entendido</button>
+      </div>
+    </section>
+
+    <!-- ============ AJUSTES ============ -->
+    <section id="settings" class="screen hidden">
+      <div class="panel">
+        <h2>Ajustes</h2>
+        <div class="setting">
+          <span>Gráficos</span>
+          <div class="seg" id="qualitySeg">
+            <button data-q="alta">Altos</button><button data-q="auto">Auto</button><button data-q="ahorro">Ahorro</button>
+          </div>
+        </div>
+        <p class="muted small left">Ahorro baja la resolución y limita a 30 FPS: el móvil se calienta menos y dura más la batería.</p>
+        <div class="setting">
+          <span>Sonido</span>
+          <div class="seg" id="soundSeg"><button data-s="1">Sí</button><button data-s="0">No</button></div>
+        </div>
+        <div class="setting">
+          <span>Vibración</span>
+          <div class="seg" id="vibeSeg"><button data-v="1">Sí</button><button data-v="0">No</button></div>
+        </div>
+        <button class="link back">Listo</button>
       </div>
     </section>
 
     <!-- ============ VS / CUENTA ATRÁS ============ -->
     <section id="versus" class="screen hidden">
       <div class="vs">
-        <div class="vs-name foe" id="vsFoe">Rival</div>
+        <div class="vs-side foe"><div class="vs-name" id="vsFoe">Rival</div><div class="vs-tr" id="vsFoeTr"></div></div>
         <div class="vs-mark">contra</div>
-        <div class="vs-name me" id="vsMe">Tú</div>
+        <div class="vs-side me"><div class="vs-name" id="vsMe">Tú</div><div class="vs-tr" id="vsMeTr"></div></div>
         <div class="vs-count" id="vsCount">3</div>
       </div>
     </section>
@@ -156,7 +209,7 @@
 
       <div id="arenaWrap">
         <canvas id="cv"></canvas>
-        <canvas id="ov"></canvas>
+        <div id="countdown" class="hidden"></div>
         <div id="banner" class="hidden"></div>
         <div id="netInfo"></div>
         <button id="emoteBtn" aria-label="Emoticonos">😀</button>
@@ -180,11 +233,12 @@
       </footer>
     </section>
 
-    <!-- ============ RESULTADO / AVISOS ============ -->
+    <!-- ============ RESULTADO ============ -->
     <div id="overlay" class="hidden">
       <div class="panel result">
         <div class="result-title" id="resTitle">¡Victoria!</div>
         <div class="result-crowns" id="resCrowns"></div>
+        <div class="result-trophies hidden" id="resTrophies"></div>
         <p class="muted" id="resText"></p>
         <div class="actions">
           <button class="btn gold" id="btnRematch">Revancha</button>
@@ -193,8 +247,21 @@
         <p class="muted small" id="rematchInfo"></p>
       </div>
     </div>
+
+    <div id="confirm" class="hidden">
+      <div class="panel">
+        <h2 id="confirmTitle">¿Rendirte?</h2>
+        <p class="muted" id="confirmText">La partida contará como derrota.</p>
+        <div class="row">
+          <button class="btn red small" id="confirmYes">Rendirme</button>
+          <button class="btn ghost small" id="confirmNo">Seguir jugando</button>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <script type="module" src="js/main.js"></script>
+  <link rel="modulepreload" href="build/app-6287fe1cdc.js">
+  <script type="module" src="build/app-6287fe1cdc.js"></script>
+  
 </body>
 </html>
